@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE DeriveDataTypeable, GeneralizedNewtypeDeriving, CPP #-}
 
 {- |
 This module defines 'Binary' and 'Hashable' instances for 'TypeRep'. These are defined on a newtype of 'TypeRep', namely 'ConcreteTypeRep', for two purposes:
@@ -23,6 +23,11 @@ module Data.ConcreteTypeRep (
  ) where
 
 import Data.Typeable
+#ifdef NEW_TYPEREP
+import Data.Typeable.Internal
+import GHC.Fingerprint.Type
+#endif
+
 import Data.Hashable
 import Data.Binary
 
@@ -52,25 +57,38 @@ fromTypeRep = CTR
 instance Show ConcreteTypeRep where
   showsPrec i = showsPrec i . unCTR
 
--- | The 'Hashable' instance is defined by running 'unsafePerformIO' on @'typeRepKey' :: 'TypeRep' -> IO Int@. 
---
--- This instance actually provides a stronger guarantee than required: it is guaranteed that @t1 == t2@ if and only if @'hash' t1 == 'hash' t2@.
---
--- As the documentation for 'typeRepKey' notes, \"... the actual value of the key may vary from run to run of the program. You should only rely on the equality property, not any actual key value. The relative ordering of keys has no meaning either.\"
+    
+-- | This instance is guaranteed to be consistent for a single run of the program, but not for multiple runs.
 instance Hashable ConcreteTypeRep where
+#ifdef NEW_TYPEREP
+  hash (CTR (TypeRep (Fingerprint w1 w2) _ _)) = hash (w1, w2)
+#else
   hash = unsafePerformIO . typeRepKey . toTypeRep
+#endif
 
 ------------- serialization: this uses Gökhan San's construction, from
 ---- http://www.mail-archive.com/haskell-cafe@haskell.org/msg41134.html
-newtype SerialRep = SR (String, [SerialRep]) deriving(Binary)
+toTyConRep :: TyCon -> TyConRep
+fromTyConRep :: TyConRep -> TyCon
+#ifdef NEW_TYPEREP
+type TyConRep = (String, String, String)
+toTyConRep (TyCon _ pack mod name) = (pack, mod, name)
+fromTyConRep (pack, mod, name) = mkTyCon3 pack mod name
+#else
+type TyConRep = String
+toTyConRep = tyConString
+fromTyConRep = mkTyCon
+#endif
+
+newtype SerialRep = SR (TyConRep, [SerialRep]) deriving(Binary)
 
 toSerial :: ConcreteTypeRep -> SerialRep
 toSerial (CTR t) = 
   case splitTyConApp t of
-    (con, args) -> SR (tyConString con, map (toSerial . CTR) args)
+    (con, args) -> SR (toTyConRep con, map (toSerial . CTR) args)
 
 fromSerial :: SerialRep -> ConcreteTypeRep
-fromSerial (SR (con, args)) = CTR $ mkTyConApp (mkTyCon con) (map (unCTR . fromSerial) args)
+fromSerial (SR (con, args)) = CTR $ mkTyConApp (fromTyConRep con) (map (unCTR . fromSerial) args)
 
 instance Binary ConcreteTypeRep where
   put = put . toSerial
